@@ -251,9 +251,136 @@ def _claude_local_estimate():
     return {"tokens_5h": sum5h, "tokens_7d": sum7d}
 
 
+def _claude_statusline_cache():
+    """读 statusline.py 写入的官方 rate_limits 快照（Claude Code 喂的真实数据）。"""
+    path = os.path.expanduser("~/.claude/quota-led-claude.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        d = json.load(open(path))
+    except Exception:
+        return None
+    rl = d.get("rate_limits") or {}
+
+    def mk(w, label):
+        up = (w or {}).get("used_percentage")
+        if up is None:
+            return None
+        return {"label": label, "remaining": round(100 - float(up), 1),
+                "resets_at": (w or {}).get("resets_at")}
+
+    rows = []
+    r5 = mk(rl.get("five_hour"), "5h")
+    r7 = mk(rl.get("seven_day"), "周")
+    if r5:
+        rows.append(r5)
+    if r7:
+        rows.append(r7)
+    if not rows:
+        return None
+    headline = {"remaining": rows[0]["remaining"], "label": rows[0]["label"] + " 剩余"}
+    return {"headline": headline, "rows": rows, "asof": d.get("ts")}
+
+
+def _parse_claude_reset(text, event_ts):
+    m = re.search(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)", text, re.I)
+    if not m or not event_ts:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = m.group(3).lower()
+    tz_name = m.group(4)
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        # 系统 Python 找不到 IANA tzdata 时，至少稳定处理本机常见的 Asia/Shanghai。
+        offsets = {"Asia/Shanghai": 8 * 3600}
+        offset = offsets.get(tz_name)
+        if offset is None:
+            return None
+        tz = datetime.timezone(datetime.timedelta(seconds=offset))
+    event_local = datetime.datetime.fromtimestamp(event_ts, tz)
+    reset_local = event_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset_local.timestamp() <= event_ts:
+        reset_local += datetime.timedelta(days=1)
+    return int(reset_local.timestamp())
+
+
+def _claude_session_limit_from_logs():
+    """读 Claude Code 本地日志中的 429 session limit，触顶时显示官方 0% 剩余。"""
+    files = glob.glob(os.path.join(HOME, ".claude/projects/**/*.jsonl"), recursive=True)
+    if not files:
+        return None
+
+    latest = None
+    for f in sorted(files, key=os.path.getmtime, reverse=True):
+        if os.path.getmtime(f) < NOW - 7 * 86400:
+            break
+        try:
+            for line in open(f, "r", errors="ignore"):
+                if "session limit" not in line and "rate_limit" not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("error") != "rate_limit" or o.get("apiErrorStatus") != 429:
+                    continue
+                text = ""
+                for part in (o.get("message") or {}).get("content") or []:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text += part.get("text") or ""
+                if "session limit" not in text:
+                    continue
+                ts = None
+                raw_ts = o.get("timestamp")
+                if raw_ts:
+                    try:
+                        import datetime
+                        ts = int(datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp())
+                    except Exception:
+                        ts = None
+                ts = ts or int(os.path.getmtime(f))
+                if not latest or ts > latest["asof"]:
+                    latest = {"asof": ts, "text": text, "reset": _parse_claude_reset(text, ts)}
+        except Exception:
+            continue
+
+    if not latest:
+        return None
+    reset_at = latest.get("reset")
+    if reset_at and reset_at <= NOW:
+        return None
+    if not reset_at and latest["asof"] < NOW - 5 * 3600:
+        return None
+    row = {"label": "5h", "remaining": 0.0}
+    if reset_at:
+        row["resets_at"] = reset_at
+    else:
+        row["sub"] = "已触顶"
+    return {"headline": {"remaining": 0.0, "label": "5h 剩余"},
+            "rows": [row], "asof": latest["asof"], "note": latest["text"]}
+
+
 def collect_claude():
-    # 默认不读钥匙串（本机无主账号 token，且读取会弹授权框）。
-    # 若日后做了常规 `claude login`，设 QUOTA_CLAUDE_KEYCHAIN=1 即可启用实时接口。
+    # 1) 官方实时数据：来自 statusLine 写入的缓存（Claude Code 自己取到的真实限额）
+    sl = _claude_statusline_cache()
+    limit = _claude_session_limit_from_logs()
+    if limit and (not sl or limit.get("asof", 0) >= sl.get("asof", 0)):
+        return _ok(plan="Claude", source="session_limit",
+                   headline=limit["headline"], rows=limit["rows"], asof=limit.get("asof"))
+    if sl:
+        return _ok(plan="Claude", source="statusline",
+                   headline=sl["headline"], rows=sl["rows"], asof=sl.get("asof"))
+
+    # 2) 可选：常规 claude login 的钥匙串 token（设 QUOTA_CLAUDE_KEYCHAIN=1 启用）
     oa = _claude_keychain_token() if os.environ.get("QUOTA_CLAUDE_KEYCHAIN") == "1" else None
     if oa:
         if oa.get("expiresAt") and oa["expiresAt"] / 1000 < NOW:
