@@ -11,7 +11,6 @@ Mac 桌面挂件：单面板三行（每行左球体+右文字）展示 **Codex 
 |------|------|
 | `collect.py` | 采集器：读三个服务的额度，输出 JSON（被挂件每 60s 调用一次）|
 | `quota.jsx` | Übersicht 挂件：渲染三栏 LED 面板 |
-| `config.json` | Claude 估算参数（额度上限、是否计入 cache_read）|
 | `statusline.py` | Claude Code statusLine 脚本：把官方 `rate_limits` 写入缓存供 collect.py 读取 |
 | `install.sh` | 把本仓库作为「文件夹挂件」软链到 Übersicht widgets 目录 |
 
@@ -25,10 +24,23 @@ Mac 桌面挂件：单面板三行（每行左球体+右文字）展示 **Codex 
 |------|----------|------|
 | **Codex** | 本地 `~/.codex/sessions/**/*.jsonl` 里的 `rate_limits` 快照 | 纯本地，无需联网；5h 与 周 两个窗口**各自**显示剩余 % 与重置时间 |
 | **Cursor** | `cursor.com/api/usage-summary`（token 取自 `state.vscdb` 的 `cursorAuth/accessToken`）| 显示 **总 / Auto+Composer / API** 三类剩余 % + 计费周期重置 |
-| **Claude Code** | **首选**：statusLine 写入的官方 `rate_limits`（5h/周）；触顶时读取本地 429 session limit；最后再本地日志估算 | 官方/触顶数据无 ≈ 标记；估算带「≈估算」黄色标记 |
+| **Claude Code** | statusLine 写入的官方 `rate_limits`；触顶时读取本地 429 `session limit` 记录 | 显示 5h 与周额度；触顶时 5h 直接显示 0%，周额度继续保留 |
 
-### Claude 栏：官方数据（推荐）
-Claude Code 的 statusLine 脚本每次渲染会收到含 `rate_limits`（5h / 7d 已用百分比 + 重置时间）的会话 JSON——这正是 `/usage` 里显示的官方数据。`statusline.py` 把它写入 `~/.claude/quota-led-claude.json`，`collect.py` 优先读它。**全程不需要 token。**
+### Claude 栏
+Claude Code 会把 statusLine 所需的会话 JSON 通过 stdin 传给命令。`statusline.py` 从里面读取：
+
+| 字段 | 显示 |
+|------|------|
+| `rate_limits.five_hour` | `5h` 剩余百分比与重置时间 |
+| `rate_limits.seven_day` | `周` 剩余百分比与重置时间 |
+
+脚本会把这两个官方窗口写到本机缓存：
+
+```text
+~/.claude/quota-led-claude.json
+```
+
+`collect.py` 优先读取这份缓存，换算成剩余百分比显示在挂件里。这个链路只读 Claude Code 已经提供给 statusLine 的数据，**不需要 token，也不调用第三方接口**。
 
 启用（一次性）：在 `~/.claude/settings.json` 加上
 ```json
@@ -36,29 +48,10 @@ Claude Code 的 statusLine 脚本每次渲染会收到含 `rate_limits`（5h / 7
     "command": "/usr/bin/python3 \"<本仓库绝对路径>/statusline.py\"" } }
 ```
 然后**重启 Claude Code**（或打开一次 `/hooks` 让配置重载）。之后你每次用 Claude Code，官方额度就会刷新到缓存，挂件 Claude 栏即显示真实余额。
-> `rate_limits` 仅对 Claude.ai 订阅（Pro/Max）用户、且本会话发生首次 API 调用后出现。
-> 若你已有自定义 statusLine，把写缓存那几行合并进去即可（脚本也会打印一行状态栏文字）。
 
-如果 Claude Code 已经触顶，日志里会出现 `You've hit your session limit · resets ...` 的 429 记录。`collect.py` 会优先读取这条本地记录，把 Claude 5h 剩余显示为 **0%**，并按提示里的重置时间显示倒计时。
+如果 Claude Code 已经触顶，Claude 本地日志里会出现 `You've hit your session limit · resets ...` 的 429 记录。`collect.py` 会读取这条记录，把 `5h` 剩余显示为 **0%**，并按提示里的重置时间显示倒计时；如果 statusLine 缓存里已有 `seven_day`，周额度会继续显示。
 
-### Claude 栏：本地估算（兜底）
-若还没启用 statusLine（或本会话还没拿到 `rate_limits`），Claude 栏退回**本地估算**：从 `~/.claude/projects/**/*.jsonl` 统计近 5h / 近 7d 的 token 消耗，按 `config.json` 的额度上限换算成剩余百分比。带 **「≈估算」** 标记、副行显示 `已用/上限`。
-
-`config.json`：
-```jsonc
-{
-  "claude": {
-    "count_cache_read": false,   // cache_read 占大头且便宜，默认不计入
-    "cap_5h_tokens": 6000000,    // 5 小时窗口额度上限（token）
-    "cap_7d_tokens": 30000000    // 7 天窗口额度上限（token）
-  }
-}
-```
-**校准建议**：上限是参考值。下次接近/触顶 Claude 限额时，记下当时 collect.py 输出的 `tokens` 值，
-把对应 `cap_*_tokens` 调到那个数，百分比就准了。改完无需重装，下次刷新自动生效。
-
-> 想换成**官方真实余额**？需要机器上存在常规的 `claudeAiOauth` 钥匙串凭证（即安装独立 `claude` CLI 并登录）。
-> 有了之后，把 `quota.jsx` 的 `command` 前面加 `QUOTA_CLAUDE_KEYCHAIN=1` 即可走 `api.anthropic.com/api/oauth/usage`。
+> `rate_limits` 通常要在 Claude Code 会话完成一次模型请求后才会出现在 statusLine 输入里。刚启用或刚打开 Claude Code 时，如果还没有数据，Claude 栏会显示暂无数据。
 
 ## 安装
 
@@ -101,7 +94,6 @@ git clone <repo> quota-led && cd quota-led
 
 - 判断依据是**剩余**（= 100 − 已用），不是已用。
 - 每个值独立判色：球体按 headline（Codex/Claude 用 5h 剩余、Cursor 用总剩余）；明细每行按各自剩余。
-- Claude 因是估算，状态灯前带 `≈`。
 - 阈值想改就改 `ledColor()` 里的 `50` / `20`。
 
 ## 自定义

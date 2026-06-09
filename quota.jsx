@@ -135,7 +135,7 @@ function ServiceRow({ name, svc, last }) {
           <span style={{ fontSize: 12.5, fontWeight: 600 }}>{name}</span>
           {ok && (
             <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, color, textShadow: `0 0 7px ${color}77` }}>
-              {svc.approx ? "≈" : ""}{statusText(remaining)}
+              {statusText(remaining)}
             </span>
           )}
         </div>
