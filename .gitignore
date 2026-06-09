@@ -1,0 +1,14 @@
+# 本地工具配置（含本机路径，不入库）
+.claude/
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# 个人化覆盖（如需自定义 config，可复制为 config.local.json 自行管理）
+config.local.json

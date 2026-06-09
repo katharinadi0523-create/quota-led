@@ -1,0 +1,10 @@
+{
+  "_说明": "Claude 栏为本地估算（本机无订阅 token）。把消耗 token 按下面的上限换算成百分比。",
+  "claude": {
+    "count_cache_read": false,
+    "_count_cache_read说明": "cache_read 是缓存读取，便宜且占大头，默认不计入；设 true 则计入。",
+    "cap_5h_tokens": 6000000,
+    "cap_7d_tokens": 30000000,
+    "_cap说明": "5 小时 / 7 天 窗口的额度上限（token）。这是估算用的参考值，请按你实际触顶时观察到的数字校准。"
+  }
+}
